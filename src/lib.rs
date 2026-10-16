@@ -1,4 +1,7 @@
-use std::{cell::RefCell, ops::Add};
+use std::{
+    cell::RefCell,
+    ops::{Add, Mul},
+};
 
 /// Struct that holds the value.
 #[derive(Copy, Clone)]
@@ -13,6 +16,7 @@ struct Node {
 enum Op {
     Leaf,
     Add(usize, usize),
+    Mul(usize, usize),
 }
 
 /// A sharable object that holds nodes and allows operations.
@@ -66,7 +70,10 @@ pub struct Value<'a> {
 
 impl Value<'_> {
     fn ensure_same_arena(&self, other: &Value) {
-        assert!(std::ptr::eq(self.arena, other.arena), "Values need to belong in the same Arena!");
+        assert!(
+            std::ptr::eq(self.arena, other.arena),
+            "Values need to belong in the same Arena!"
+        );
     }
 
     pub fn data(&self) -> f64 {
@@ -89,6 +96,12 @@ impl Value<'_> {
                     borrow.get_mut(a).unwrap().grad += node.grad;
                     borrow.get_mut(b).unwrap().grad += node.grad;
                 }
+                Op::Mul(a, b) => {
+                    let (a_data, b_data) =
+                        (borrow.get(a).unwrap().data, borrow.get(b).unwrap().data);
+                    borrow.get_mut(a).unwrap().grad += node.grad * b_data;
+                    borrow.get_mut(b).unwrap().grad += node.grad * a_data;
+                }
             }
         }
     }
@@ -101,6 +114,16 @@ impl Add for Value<'_> {
         self.ensure_same_arena(&rhs);
         let res = self.data() + rhs.data();
         self.arena.push_node(res, Op::Add(self.idx, rhs.idx))
+    }
+}
+
+impl Mul for Value<'_> {
+    type Output = Self;
+
+    fn mul(self, rhs: Self) -> Self::Output {
+        self.ensure_same_arena(&rhs);
+        let res = self.data() * rhs.data();
+        self.arena.push_node(res, Op::Mul(self.idx, rhs.idx))
     }
 }
 
@@ -147,6 +170,25 @@ mod tests {
     }
 
     #[test]
+    fn test_value_backward_mul_distinct() {
+        let arena = Arena::new();
+        let a = arena.leaf(-4.0);
+        let b = arena.leaf(2.0);
+        let c = a * b;
+        c.backward();
+        assert_eq!((a.grad(), b.grad()), (2.0, -4.0));
+    }
+
+    #[test]
+    fn test_value_backward_mul_reused() {
+        let arena = Arena::new();
+        let a = arena.leaf(-4.0);
+        let b = a * a;
+        b.backward();
+        assert_eq!((a.grad(), b.grad()), (-8.0, 1.0));
+    }
+
+    #[test]
     fn test_value_backward_add_distinct() {
         let arena = Arena::new();
         let a = arena.leaf(-4.0);
@@ -175,5 +217,46 @@ mod tests {
         assert_eq!((a.grad(), b.grad(), c.grad()), (1.0, 1.0, 1.0));
         arena.zero_grad();
         assert_eq!((a.grad(), b.grad(), c.grad()), (0.0, 0.0, 0.0));
+    }
+
+    #[test]
+    fn test_value_chain_rule() {
+        let arena = Arena::new();
+        let a = arena.leaf(-4.0);
+        let b = arena.leaf(2.0);
+        let c = (a * b) * b;
+        c.backward();
+        assert_eq!(c.data(), -16.0);
+        assert_eq!(a.grad(), 4.0);
+        assert_eq!(b.grad(), -16.0);
+    }
+
+    #[test]
+    fn test_value_mul() {
+        let arena = Arena::new();
+        let a = arena.leaf(-4.0);
+        let b = arena.leaf(2.0);
+        let c = a * b;
+        assert_eq!(c.data(), -8.0);
+    }
+
+    #[test]
+    #[should_panic(expected = "Values need to belong in the same Arena!")]
+    fn test_value_mul_diff_arena() {
+        let arena1 = Arena::new();
+        let arena2 = Arena::new();
+        let a = arena1.leaf(1.0);
+        let b = arena2.leaf(1.0);
+        let _ = a * b;
+    }
+
+    #[test]
+    fn test_value_mix_add_mul() {
+        let arena = Arena::new();
+        let a = arena.leaf(-4.0);
+        let b = arena.leaf(2.0);
+        let c = a * b + a;
+        c.backward();
+        assert_eq!((a.grad(), b.grad()), (3.0, -4.0));
     }
 }
