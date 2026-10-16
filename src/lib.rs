@@ -9,7 +9,7 @@ struct Node {
 }
 
 /// Holds all operations supported by micrograd-rs.
-#[derive(Debug, Copy, Clone)]
+#[derive(Debug, Copy, Clone, PartialEq)]
 enum Op {
     Leaf,
     Add(usize, usize),
@@ -65,6 +65,10 @@ pub struct Value<'a> {
 }
 
 impl Value<'_> {
+    fn ensure_same_arena(&self, other: &Value) {
+        assert!(std::ptr::eq(self.arena, other.arena), "Values need to belong in the same Arena!");
+    }
+
     pub fn data(&self) -> f64 {
         self.arena.nodes.borrow()[self.idx].data
     }
@@ -94,6 +98,7 @@ impl Add for Value<'_> {
     type Output = Self;
 
     fn add(self, rhs: Self) -> Self::Output {
+        self.ensure_same_arena(&rhs);
         let res = self.data() + rhs.data();
         self.arena.push_node(res, Op::Add(self.idx, rhs.idx))
     }
@@ -102,7 +107,6 @@ impl Add for Value<'_> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::any::Any;
 
     #[test]
     fn test_value_data() {
@@ -123,40 +127,41 @@ mod tests {
     }
 
     #[test]
+    #[should_panic(expected = "Values need to belong in the same Arena!")]
+    fn test_value_add_diff_arena() {
+        let arena1 = Arena::new();
+        let arena2 = Arena::new();
+        let a = arena1.leaf(1.0);
+        let b = arena2.leaf(1.0);
+        let _ = a + b;
+    }
+
+    #[test]
     fn test_arena_node_contains_op() {
         let arena = Arena::new();
         let a = arena.leaf(-4.0);
         let b = arena.leaf(2.0);
         let c = a + b;
-        assert_eq!(
-            a.arena.nodes.borrow()[c.idx].op.type_id(),
-            Op::Leaf.type_id()
-        );
-        assert_eq!(
-            b.arena.nodes.borrow()[c.idx].op.type_id(),
-            Op::Leaf.type_id()
-        );
-        assert_eq!(
-            c.arena.nodes.borrow()[c.idx].op.type_id(),
-            Op::Add(0, 1).type_id()
-        );
+        assert_eq!(a.arena.nodes.borrow()[a.idx].op, Op::Leaf);
+        assert_eq!(c.arena.nodes.borrow()[c.idx].op, Op::Add(a.idx, b.idx));
     }
 
     #[test]
-    fn test_value_backward_add() {
+    fn test_value_backward_add_distinct() {
         let arena = Arena::new();
         let a = arena.leaf(-4.0);
-        let b = arena.leaf(-4.0);
+        let b = arena.leaf(2.0);
         let c = a + b;
         c.backward();
         assert_eq!((a.grad(), b.grad(), c.grad()), (1.0, 1.0, 1.0));
+    }
 
+    #[test]
+    fn test_value_backward_add_reused() {
         let arena = Arena::new();
         let a = arena.leaf(-4.0);
         let b = a + a;
         b.backward();
-        assert_eq!(a.grad(), 2.0);
-        assert_eq!(b.grad(), 1.0);
         assert_eq!((a.grad(), b.grad()), (2.0, 1.0));
     }
 
